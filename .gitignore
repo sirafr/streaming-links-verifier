@@ -1,0 +1,16 @@
+.venv/
+.idea/
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Run outputs: reports and HTML snapshots contain our egress IP and session IDs.
+reports/
+
+# Unsanitized Step 0 captures (raw HTML + response headers with cookies).
+tests/fixtures/raw/
+
+# Input alert dumps
+files/

@@ -1,0 +1,151 @@
+# Detection rules for Prime Video detail pages.
+#
+# Everything the parser/classifier keys on lives here, so when Amazon changes
+# the page you should only need to edit this file. After editing, run:
+#   pytest                                   # fixtures still classify correctly
+#   python -m prime_availability_checker reclassify reports/<run>/report.jsonl
+# to re-score an earlier run from its saved snapshots without refetching.
+#
+# All text patterns are case-insensitive Python regexes.
+
+marketplaces:
+  uk:
+    host: www.amazon.co.uk
+    accept_language: "en-GB,en;q=0.9"
+    territory: GB
+  us:
+    host: www.amazon.com
+    accept_language: "en-US,en;q=0.9"
+    territory: US
+  de:
+    host: www.amazon.de
+    accept_language: "de-DE,de;q=0.9,en;q=0.5"
+    territory: DE
+
+default_marketplace: uk
+
+# --- Fetch-level classification (evaluated before any parsing) -------------
+
+blocked:
+  # Statuses that mean "we were not allowed to look", never "content is gone".
+  http_status: [403, 429, 503]
+  # Captcha / bot-wall markers. Do NOT add "automated access" or the
+  # api-services-support address here: that sentence is also in the footer of
+  # the normal 404 "Dogs of Amazon" page, and real removals would turn BLOCKED.
+  text_patterns:
+    - "/errors/validateCaptcha"
+    - "Type the characters you see in this image"
+    - "Enter the characters you see below"
+    - "<title>\\s*Robot Check"
+
+not_found:
+  http_status: [404, 410]
+  # Used as supporting evidence; a 404 status alone is enough for UNAVAILABLE.
+  text_patterns:
+    - "<title>\\s*Page Not Found"
+    - "Dogs of Amazon"
+    - "looking for something\\?"
+
+# --- Embedded JSON ---------------------------------------------------------
+
+hydration:
+  # <script id="..." type="application/json"> blocks embedded in the page.
+  page_script_id: dv-web-page-hydration-data
+  global_script_id: dv-web-global-store-data
+
+  # Paths are lists of keys into the parsed JSON.
+  # Above-the-fold buy box, keyed by the page's ASIN.
+  actions_path: [init, preparations, body, atf, state, action, atf]
+  # Buy boxes of the episode list, keyed by episode ASIN. Read only when the
+  # season-level box has no paid/Prime/channel offer, e.g. Amazon Originals
+  # whose season box just says "First episode free" while episodes 2+ say
+  # "Join Prime". Remove this line to disable the fallback.
+  episode_actions_path: [init, preparations, body, btf, state, action, btf]
+  # Titles shown on the page (season + sample episode), keyed by ASIN.
+  self_path: [init, preparations, body, atf, state, self]
+  # Title metadata keyed by ASIN: title, parentTitle (show name), titleType,
+  # catalogId (GTI), isPrime.
+  header_detail_path: [init, preparations, body, atf, state, detail, headerDetail]
+  # {"pageType": "ATVDetail", "pageTypeId": "<ASIN>"}
+  head_metadata_path: [init, preparations, head, pageMetadata]
+  # From the global store script.
+  territory_path: [RequestContext, currentTerritory]
+  marketplace_id_path: [RequestContext, marketplaceID]
+
+# --- Buy-box action interpretation -----------------------------------------
+#
+# Each buy-box action carries a JSON "actionMetadata" with actionType,
+# subscriptionType, transactionType, offerFamily, benefitId and a label such as
+# "Buy Season 1 {conditionalLineBreak}{bold}SD{end} £7.99".
+
+actions:
+  # Containers that only wrap nested actions; we descend into them.
+  container_types: [EXPAND_CARD_OPTION]
+  # Known actions that are not offers by themselves ("More ways to watch").
+  ignore_types: [SHOW_CARD_OPTIONS]
+  # Actions whose label is an informational message.
+  message_types: [MESSAGE]
+  subscribe_types: [SUBSCRIBE]
+  transact_types: [TRANSACT]
+  play_types: [PLAYBACK, PLAY, WATCH_NOW, RESUME]
+
+  # actionMetadata.subscriptionType -> offer type
+  subscription_types:
+    PRIME: prime
+    PV_CHANNEL: channel
+    AVOD: free
+    FREE_WITH_ADS: free
+
+  # actionMetadata.transactionType -> offer type
+  transaction_types:
+    PURCHASE: buy
+    RENTAL: rent
+    RENT: rent
+    TVOD_RENTAL: rent
+
+  # actionMetadata.benefitId values that mean free to watch:
+  #   freewithads - "Play S1 E1", entitlementType THIRD_PARTY_SUBSCRIPTION
+  #   FVOD        - "Watch now", entitlementType FREE (often "First episode free")
+  free_benefit_ids: [freewithads, FVOD]
+  # Play buttons for these videoMaterialType values are not offers.
+  ignore_material_types: [Trailer, Promo, Bonus]
+  # ...nor are buttons with these labels (some trailers are typed "Feature").
+  ignore_label_patterns:
+    - "^watch trailer"
+
+  # Any action label matching these is a free-with-ads offer.
+  free_label_patterns:
+    - "free with ads"
+    - "watch (?:for )?free"
+
+  # Extract the channel display name from a label like
+  # "Watch with Hayu{lineBreak}Start your 7-day free trial".
+  channel_name_pattern: "Watch with (.+?)(?:\\{|$)"
+  # Price in a label or message.
+  price_pattern: "(£|\\$|€|US\\$)\\s?(\\d{1,4}(?:[.,]\\d{2})?)"
+  # Video quality tag inside the label.
+  quality_pattern: "\\{bold\\}(UHD|4K|HD|SD)\\{end\\}"
+
+# Buy-box message text that means the title cannot be watched here.
+unavailable_messages:
+  - "currently unavailable"
+  - "not available in your location"
+  - "isn'?t available (?:to watch|in your location)"
+  - "no longer available"
+  - "unavailable to watch"
+
+# --- Sanity checks ---------------------------------------------------------
+
+# If the page was served for a territory other than the marketplace's, the
+# offers reflect the wrong region; we return UNKNOWN instead of trusting them.
+require_territory_match: true
+
+title_check:
+  enabled: true
+  # 0..1 similarity between the alert title and the page's show title.
+  min_similarity: 0.5
+  # Compared against headerDetail.parentTitle (falls back to .title).
+  # Page titles that are catalog placeholders; skip the comparison for them.
+  placeholder_titles:
+    - "placeholder_title"
+
